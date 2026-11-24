@@ -292,7 +292,10 @@ const wss = new WebSocketServer({ server, maxPayload: 256 * 1024 });
 const clients = new Map();          // id -> client
 const rooms = new Map();            // code -> room
 const CODE_CH = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const MAPS = ['backrooms', 'mall', 'ville', 'random', 'a_titan', 'a_hydra', 'a_spider', 'a_eye', 'a_random', 'a_duel'], DIFFS = ['easy', 'normal', 'hard', 'nightmare', 'heroique', 'cauchemar'];
+// les cartes et difficultés sont décrites côté client : le serveur accepte tout identifiant simple
+// (ainsi, ajouter une carte, un boss ou un mode ne demande plus de redéployer le serveur)
+const ID_RE = /^[a-z0-9_]{1,24}$/;
+const MAPS = { includes: v => typeof v === 'string' && ID_RE.test(v) }, DIFFS = { includes: v => typeof v === 'string' && ID_RE.test(v) };
 let nextId = 1;
 
 const send = (c, o) => { try { if (c && c.ws.readyState === 1) c.ws.send(typeof o === 'string' ? o : JSON.stringify(o)); } catch (e) {} };
@@ -356,6 +359,21 @@ wss.on('connection', (ws, req) => {
         break;
       }
       case 'ping': send(c, { t: 'pong', c: m.c, online: clients.size }); break;
+      case 'api': {   // même API que /api/* mais par le WebSocket (réseaux d'école où le fetch HTTPS est filtré)
+        const q = m.q, route = String(m.path || ''), body = (m.body && typeof m.body === 'object') ? m.body : {}, k = m.token ? readToken(String(m.token)) : null;
+        const reply = ([code, o]) => send(c, { t: 'apir', q, c: code, o });
+        (async () => {
+          if (route === '/api/leaderboard') return reply(apiLeaderboard());
+          if (route === '/api/register') return reply(await apiRegister(body, c.ip));
+          if (route === '/api/login') return reply(await apiLogin(body, c.ip));
+          if (!k) return reply([401, { error: 'Session expirée, reconnecte-toi.' }]);
+          if (route === '/api/me') return reply(apiMe(k));
+          if (route === '/api/save') return reply(apiSave(k, body));
+          if (route === '/api/password') return reply(await apiPassword(k, body));
+          reply([404, { error: 'Route inconnue' }]);
+        })().catch(e => { log('Erreur API ws', e.message); reply([500, { error: 'Erreur serveur' }]); });
+        break;
+      }
       case 'list': send(c, { t: 'rooms', list: roomList(), online: clients.size }); break;
       case 'profile': c.look = cleanLook(m.look); if (m.level) c.level = Math.max(1, Math.min(999, m.level | 0)); if (r) broadcastRoom(r); break;
       case 'create': {
