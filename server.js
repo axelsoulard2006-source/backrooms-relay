@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
-const VERSION = 2;
+const VERSION = 3;     // 3 : reprise de session après une coupure (plus de joueur en double dans un salon)
 const PORT = process.env.PORT || 8080;
 const GH = {
   token: process.env.GITHUB_TOKEN || '',
@@ -305,7 +305,7 @@ const cleanLook = l => { const o = {}; l = l && typeof l === 'object' ? l : {}; 
 
 function roomView(r) {
   return {
-    code: r.code, name: r.name, host: r.host, state: r.state, map: r.map, diff: r.diff, max: r.max, priv: r.priv, round: r.round,
+    code: r.code, name: r.name, host: r.host, state: r.state, map: r.map, diff: r.diff, max: r.max, priv: r.priv, round: r.round, teams: r.teams || {},
     players: r.order.map(id => { const c = clients.get(id); return c ? { id, name: c.name, look: c.look, level: c.level, ready: !!r.ready[id], acc: !!c.account } : null; }).filter(Boolean),
   };
 }
@@ -313,13 +313,28 @@ function roomList() {
   return [...rooms.values()].filter(r => !r.priv).map(r => ({ code: r.code, name: r.name, hostName: (clients.get(r.host) || {}).name || '?', n: r.order.length, max: r.max, map: r.map, diff: r.diff, state: r.state }))
     .sort((a, b) => (a.state === 'lobby' ? 0 : 1) - (b.state === 'lobby' ? 0 : 1) || b.n - a.n).slice(0, 60);
 }
+/* présence par jeu (écran d'accueil) : qui joue à quoi. Un joueur dans un salon compte pour le jeu du salon,
+   sinon pour le jeu dont il parcourt les menus (message « where »). */
+const GAMES = ['backrooms', 'colosses', 'portes'];
+const gameOfRoom = r => /^a_/.test(r.map) ? 'colosses' : (/^d_/.test(r.map) || String(r.name || '').includes('⁣')) ? 'portes' : 'backrooms';
+function presence() {
+  const out = { backrooms: [], colosses: [], portes: [] };
+  for (const c of clients.values()) {
+    if (c.gone || !c.hello) continue;
+    const r = c.room && rooms.get(c.room), g = r ? gameOfRoom(r) : c.game;
+    if (!g || !out[g]) continue;
+    out[g].push({ n: c.name, s: r ? (r.state === 'game' ? 'game' : 'lobby') : 'menu' });
+  }
+  for (const g of GAMES) out[g] = out[g].sort((a, b) => a.n.localeCompare(b.n)).slice(0, 60);
+  return out;
+}
 function broadcastRoom(r, extra) { const v = { t: 'room', room: roomView(r) }; if (extra) Object.assign(v, extra); const s = JSON.stringify(v); r.order.forEach(id => send(clients.get(id), s)); }
 function toRoom(r, o, exceptId) { const s = JSON.stringify(o); r.order.forEach(id => { if (id !== exceptId) send(clients.get(id), s); }); }
 
 function leaveRoom(c, reason) {
   const r = c.room && rooms.get(c.room); c.room = null;
   if (!r) return;
-  r.order = r.order.filter(id => id !== c.id); delete r.ready[c.id];
+  r.order = r.order.filter(id => id !== c.id); delete r.ready[c.id]; if (r.teams) delete r.teams[c.id];
   if (!r.order.length) { rooms.delete(r.code); log('Salon fermé', r.code); return; }
   toRoom(r, { t: 'left', id: c.id, name: c.name, reason: reason || 'quit' });
   if (r.host === c.id) {
@@ -339,8 +354,16 @@ function joinRoom(c, r) {
   toRoom(r, { t: 'sys', m: c.name + ' a rejoint le salon.' }, c.id);
 }
 
+/* reprise de session : chaque onglet envoie un identifiant stable (sid). Une coupure réseau ne fait plus quitter le salon
+   tout de suite : le joueur garde sa place GRACE_MS ; s'il se reconnecte à temps (même sid), il reprend le même identifiant,
+   le même salon et la partie continue. Avant : il était retiré aussitôt, puis revenait comme un NOUVEAU joueur — et si
+   l'ancienne connexion « fantôme » n'était pas encore détectée, il apparaissait deux fois dans le salon. */
+const GRACE_MS = 25000;
+const cleanSid = s => (typeof s === 'string' && /^[A-Za-z0-9]{8,40}$/.test(s)) ? s : null;
+function dropClient(c, reason) { clearTimeout(c.goneTimer); c.goneTimer = null; leaveRoom(c, reason); clients.delete(c.id); }
+
 wss.on('connection', (ws, req) => {
-  const c = { id: 'p' + (nextId++).toString(36), ws, name: 'Survivant', look: cleanLook(), level: 1, account: false, room: null, alive: true, ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim(), bucket: 200, bt: Date.now() };
+  let c = { id: 'p' + (nextId++).toString(36), ws, name: 'Survivant', look: cleanLook(), level: 1, account: false, room: null, alive: true, ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim(), bucket: 200, bt: Date.now(), sid: null };
   clients.set(c.id, c);
   ws.on('pong', () => { c.alive = true; });
   ws.on('message', raw => {
@@ -353,9 +376,24 @@ wss.on('connection', (ws, req) => {
     const r = c.room ? rooms.get(c.room) : null;
     switch (m.t) {
       case 'hello': {
+        const sid = cleanSid(m.sid);
+        // même onglet déjà connu (connexion précédente coupée ou fantôme) : on reprend sa place au lieu d'en créer une 2e
+        let resumed = false;
+        if (sid) for (const o of clients.values()) {
+          if (o === c || o.sid !== sid) continue;
+          const oldWs = o.ws;
+          clearTimeout(o.goneTimer); o.goneTimer = null; o.gone = 0;
+          clients.delete(c.id);
+          o.ws = ws; o.alive = true; o.ip = c.ip; o.bucket = c.bucket; o.bt = c.bt;
+          c = o; resumed = !!o.room;
+          if (oldWs && oldWs !== ws) { try { oldWs.terminate(); } catch (e) {} }
+          break;
+        }
+        c.sid = sid; c.hello = true;
         c.name = cleanName(m.name); c.look = cleanLook(m.look); c.level = Math.max(1, Math.min(999, m.level | 0 || 1));
         if (m.token) { const k = readToken(m.token); if (k) { c.account = true; c.name = Store.data.users[k].name; } }
-        send(c, { t: 'welcome', id: c.id, v: VERSION, online: clients.size, rooms: roomList() });
+        send(c, { t: 'welcome', id: c.id, v: VERSION, online: clients.size, rooms: roomList(), resumed });
+        if (resumed) { const rr = rooms.get(c.room); if (rr) { send(c, { t: 'room', room: roomView(rr) }); toRoom(rr, { t: 'sys', m: c.name + ' est de retour.' }, c.id); } }
         break;
       }
       case 'ping': send(c, { t: 'pong', c: m.c, online: clients.size }); break;
@@ -375,6 +413,8 @@ wss.on('connection', (ws, req) => {
         break;
       }
       case 'list': send(c, { t: 'rooms', list: roomList(), online: clients.size }); break;
+      case 'where': c.game = GAMES.includes(m.g) ? m.g : null; break;
+      case 'presence': send(c, { t: 'presence', p: presence(), online: clients.size }); break;
       case 'profile': c.look = cleanLook(m.look); if (m.level) c.level = Math.max(1, Math.min(999, m.level | 0)); if (r) broadcastRoom(r); break;
       case 'create': {
         const nr = { code: newCode(), name: String(m.name || (c.name + ' — salon')).replace(/[<>]/g, '').slice(0, 28), host: c.id, state: 'lobby', map: MAPS.includes(m.map) ? m.map : 'backrooms', diff: DIFFS.includes(m.diff) ? m.diff : 'normal', max: Math.max(1, Math.min(8, m.max | 0 || 6)), priv: !!m.priv, order: [], ready: {}, round: 0, banned: new Set(), created: Date.now() };
@@ -400,6 +440,8 @@ wss.on('connection', (ws, req) => {
         if (MAPS.includes(m.map)) r.map = m.map; if (DIFFS.includes(m.diff)) r.diff = m.diff;
         if (m.max) r.max = Math.max(r.order.length, Math.min(8, m.max | 0));
         if (m.priv != null) r.priv = !!m.priv; if (m.name) r.name = String(m.name).replace(/[<>]/g, '').slice(0, 28);
+        // équipes du mode duel : { idJoueur: 0..5 } (seulement les joueurs du salon)
+        if (m.teams && typeof m.teams === 'object') { const t = {}; for (const id of r.order) { const v = m.teams[id]; if (Number.isInteger(v) && v >= 0 && v < 6) t[id] = v; } r.teams = t; }
         broadcastRoom(r); break;
       }
       case 'ready': if (r && r.state === 'lobby') { r.ready[c.id] = !!m.v; broadcastRoom(r); } break;
@@ -431,12 +473,23 @@ wss.on('connection', (ws, req) => {
       }
     }
   });
-  ws.on('close', () => { leaveRoom(c, 'disconnect'); clients.delete(c.id); });
+  ws.on('close', () => {
+    if (c.ws !== ws) return;                       // connexion remplacée par une reprise : rien à faire
+    if (!c.room || !c.sid) { dropClient(c, 'disconnect'); return; }
+    // coupure : on garde la place quelques secondes, le temps que le client se reconnecte
+    c.gone = Date.now(); clearTimeout(c.goneTimer);
+    const r = rooms.get(c.room); if (r) toRoom(r, { t: 'sys', m: c.name + ' a perdu la connexion… (reprise possible pendant ' + Math.round(GRACE_MS / 1000) + ' s)' }, c.id);
+    const me = c; c.goneTimer = setTimeout(() => { if (me.ws === ws) dropClient(me, 'disconnect'); }, GRACE_MS);
+  });
   ws.on('error', () => {});
 });
 setInterval(() => {
-  for (const c of clients.values()) { if (!c.alive) { try { c.ws.terminate(); } catch (e) {} continue; } c.alive = false; try { c.ws.ping(); } catch (e) {} }
-}, 20000);
+  for (const c of clients.values()) {
+    if (c.gone || !c.ws || c.ws.readyState !== 1) continue;   // en attente de reprise : pas de ping
+    if (!c.alive) { try { c.ws.terminate(); } catch (e) {} continue; }
+    c.alive = false; try { c.ws.ping(); } catch (e) {}
+  }
+}, 15000);
 
 /* ===================================================================
    DÉMARRAGE / ARRÊT
