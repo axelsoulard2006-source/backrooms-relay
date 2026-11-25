@@ -152,7 +152,27 @@ function cleanProfile(p, name) {
     inv, loadout: strArr(p.loadout, 3), title: typeof p.title === 'string' ? p.title.slice(0, 24) : '', created: num(p.created, 0, 1e14, Date.now()),
     daily: num(p.daily, 0, 1e14, 0), streak: num(p.streak, 0, 1000, 0), achievements: strArr(p.achievements, 80),
     arena: cleanArena(p.arena, num, strArr),
+    asc: cleanAsc(p.asc, num),
   };
+}
+
+// COLOSSES : L'ASCENSION — éclats d'âme, déblocages, paliers, records (formes et bornes contrôlées)
+function cleanAsc(a, num) {
+  a = a && typeof a === 'object' ? a : {};
+  const u = {}; if (a.u && typeof a.u === 'object') for (const k of Object.keys(a.u).slice(0, 30)) if (/^[a-z_0-9]{2,16}$/.test(k)) u[k] = num(a.u[k], 0, 5, 0);
+  const best = {}; if (a.best && typeof a.best === 'object') for (let p = 0; p <= 10; p++) if (a.best[p]) best[p] = num(a.best[p], 0, 15, 0);
+  // niveau de chaque classe (xp) et nœuds de son arbre de compétences ; build choisi au village
+  const sid = v => typeof v === 'string' && /^[a-z_0-9]{2,24}$/.test(v) ? v : null;
+  const cls = {}, C = a.cls && typeof a.cls === 'object' ? a.cls : {};
+  for (const k of ['chevalier', 'mage', 'archer']) { const c = C[k] && typeof C[k] === 'object' ? C[k] : {}, nodes = {}; if (c.nodes && typeof c.nodes === 'object') for (const id of Object.keys(c.nodes).slice(0, 120)) if (sid(id)) nodes[id] = num(c.nodes[id], 0, 5, 0); const pw = Array.isArray(c.pw) ? Array.from(new Set(c.pw.filter(sid))).slice(0, 40) : []; cls[k] = { xp: num(c.xp, 0, 1e9, 0), nodes, pw }; }
+  const s = a.sel && typeof a.sel === 'object' ? a.sel : {};
+  const sel = { cls: ['chevalier', 'mage', 'archer'].includes(s.cls) ? s.cls : null, kit: [0, 1, 2, 3].map(i => Array.isArray(s.kit) ? sid(s.kit[i]) : null), ult: sid(s.ult) };
+  const qs = a.q && typeof a.q === 'object' ? a.q : {}, ql = L => Array.isArray(L) ? L.slice(0, 6).filter(x => x && sid(x.id)).map(x => ({ id: x.id, p: num(x.p, 0, 1e6, 0), c: x.c ? 1 : 0 })) : [];
+  const q = { day: typeof qs.day === 'string' ? qs.day.slice(0, 10) : '', week: typeof qs.week === 'string' ? qs.week.slice(0, 10) : '', d: ql(qs.d), w: ql(qs.w) };
+  const nmap = (x, max, lim) => { const out = {}; if (x && typeof x === 'object') for (const k of Object.keys(x).slice(0, lim)) if (sid(k)) out[k] = num(x[k], 0, max, 0); return out; };
+  const wk0 = a.wk && typeof a.wk === 'object' ? a.wk : {}, wk = { key: typeof wk0.key === 'string' ? wk0.key.slice(0, 10) : '', fl: num(wk0.fl, 0, 9999, 0), t: num(wk0.t, 0, 1e7, 0) };
+  return { sh: num(a.sh, 0, 1e8, 0), u, pal: num(a.pal, 0, 10, 0), best, runs: num(a.runs, 0, 1e8, 0), wins: num(a.wins, 0, 1e8, 0), fast: num(a.fast, 0, 1e7, 0), cls, sel, q,
+    inf: num(a.inf, 0, 9999, 0), st: nmap(a.st, 1e9, 80), bes: nmap(a.bes, 1e9, 40), ach: nmap(a.ach, 1, 120), title: sid(a.title) || '', wk };
 }
 
 // jeu 2 (COLOSSES) : compétences possédées, équipement, statistiques (formes et bornes contrôlées)
@@ -219,7 +239,11 @@ function apiLeaderboard() {
   if (lbCache && Date.now() - lbTime < 20000) return [200, lbCache];
   const all = Object.values(Store.data.users).map(u => ({ name: u.name, xp: u.profile.xp || 0, escapes: (u.profile.stats || {}).escapes || 0, games: (u.profile.stats || {}).games || 0, fuses: (u.profile.stats || {}).fuses || 0, revives: (u.profile.stats || {}).revives || 0, skin: (u.profile.look || {}).skin || 'survivor' }));
   const top = k => all.slice().sort((a, b) => b[k] - a[k]).slice(0, 50);
-  lbCache = { xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length }; lbTime = Date.now();
+  const now = new Date(), wd = (now.getUTCDay() + 6) % 7, mon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - wd)), wkey = mon.toISOString().slice(0, 10);
+  const ascU = Object.values(Store.data.users).map(u => ({ name: u.name, a: (u.profile && u.profile.asc) || {} }));
+  const ascInf = ascU.filter(x => x.a.inf > 0).map(x => ({ name: x.name, fl: x.a.inf })).sort((p, q) => q.fl - p.fl).slice(0, 30);
+  const ascWk = ascU.filter(x => x.a.wk && x.a.wk.key === wkey && x.a.wk.fl > 0).map(x => ({ name: x.name, fl: x.a.wk.fl, t: x.a.wk.t })).sort((p, q) => q.fl - p.fl || p.t - q.t).slice(0, 30);
+  lbCache = { xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length, asc: { week: wkey, inf: ascInf, wk: ascWk } }; lbTime = Date.now();
   return [200, lbCache];
 }
 
@@ -360,7 +384,14 @@ function joinRoom(c, r) {
    l'ancienne connexion « fantôme » n'était pas encore détectée, il apparaissait deux fois dans le salon. */
 const GRACE_MS = 25000;
 const cleanSid = s => (typeof s === 'string' && /^[A-Za-z0-9]{8,40}$/.test(s)) ? s : null;
-function dropClient(c, reason) { clearTimeout(c.goneTimer); c.goneTimer = null; leaveRoom(c, reason); clients.delete(c.id); }
+/* ---------- le village (accueil de l'Ascension) : tous les joueurs présents s'y voient ---------- */
+const village = new Map();         // id -> client présent au village
+const VMAX = 40;
+const vnum = (v, a, b) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(b, Math.round(v * 100) / 100)) : 0; };
+const vview = c => ({ id: c.id, n: c.name, look: c.look, lv: c.level, x: c.vil.x, y: c.vil.y, z: c.vil.z, r: c.vil.r, a: c.vil.a });
+function vbroadcast(from, o) { const s = JSON.stringify(o); village.forEach((v, id) => { if (id !== from) send(v, s); }); }
+function villageLeave(c) { if (!village.has(c.id)) return; village.delete(c.id); c.vil = null; vbroadcast(c.id, { t: 'vleave', id: c.id }); }
+function dropClient(c, reason) { clearTimeout(c.goneTimer); c.goneTimer = null; villageLeave(c); leaveRoom(c, reason); clients.delete(c.id); }
 
 wss.on('connection', (ws, req) => {
   let c = { id: 'p' + (nextId++).toString(36), ws, name: 'Survivant', look: cleanLook(), level: 1, account: false, room: null, alive: true, ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim(), bucket: 200, bt: Date.now(), sid: null };
@@ -463,6 +494,28 @@ wss.on('connection', (ws, req) => {
         const out = JSON.stringify({ t: 'r', f: c.id, d: m.d });
         if (m.to === '*' || (m.to == null && r.host === c.id)) r.order.forEach(id => { if (id !== c.id) send(clients.get(id), out); });
         else send(clients.get(m.to == null ? r.host : m.to), out);
+        break;
+      }
+      case 'vjoin': {
+        if (!village.has(c.id) && village.size >= VMAX) break;
+        c.vil = { x: vnum(m.x, -300, 300), y: vnum(m.y, -20, 400), z: vnum(m.z, -300, 300), r: vnum(m.r, -10, 10), a: typeof m.a === 'string' ? m.a.slice(0, 32) : '' };
+        const was = village.has(c.id); village.set(c.id, c);
+        send(c, { t: 'vlist', p: [...village.values()].filter(v => v !== c && v.vil).map(vview) });
+        if (!was) vbroadcast(c.id, Object.assign({ t: 'vjoin' }, vview(c)));
+        break;
+      }
+      case 'vpos': {
+        if (!c.vil || !village.has(c.id)) break;
+        c.vil.x = vnum(m.x, -300, 300); c.vil.y = vnum(m.y, -20, 400); c.vil.z = vnum(m.z, -300, 300); c.vil.r = vnum(m.r, -10, 10); if (typeof m.a === 'string') c.vil.a = m.a.slice(0, 32);
+        vbroadcast(c.id, { t: 'vpos', id: c.id, x: c.vil.x, y: c.vil.y, z: c.vil.z, r: c.vil.r, a: c.vil.a });
+        break;
+      }
+      case 'vleave': villageLeave(c); break;
+      case 'vemote': if (village.has(c.id)) vbroadcast(c.id, { t: 'vemote', id: c.id, e: String(m.e || '').slice(0, 16) }); break;
+      case 'vchat': {
+        if (!village.has(c.id)) break;
+        const txt = String(m.m || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 120); if (!txt) break;
+        const o = JSON.stringify({ t: 'vchat', id: c.id, n: c.name, m: txt }); village.forEach(v => send(v, o));
         break;
       }
       case 'chat': {
