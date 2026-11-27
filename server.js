@@ -164,6 +164,7 @@ function cleanBz(b, num, strArr) {
   const q = b.q && typeof b.q === 'object' ? b.q : {};
   return { hat: sid(b.hat), trail: sid(b.trail), win: sid(b.win), own: strArr(b.own, 120).filter(sid),
     q: { day: typeof q.day === 'string' ? q.day.slice(0, 10) : '', l: Array.isArray(q.l) ? q.l.slice(0, 4).filter(x => x && sid(x.id)).map(x => ({ id: x.id, p: num(x.p, 0, 1e6, 0), c: x.c ? 1 : 0 })) : [] },
+    dj: (() => { const d = b.dj && typeof b.dj === 'object' ? b.dj : {}; return { day: typeof d.day === 'string' ? d.day.slice(0, 10) : '', t: num(d.t, 0, 1e7, 0), m: num(d.m, 0, 999, 0), n: num(d.n, 0, 1e6, 0) }; })(),
     sx: num(b.sx, 0, 1e9, 0), ss: typeof b.ss === 'string' ? b.ss.slice(0, 7) : '', got: num(b.got, 0, 1000, 0), st: (() => { const o = {}; if (b.st && typeof b.st === 'object') for (const k of Object.keys(b.st).slice(0, 30)) if (sid(k)) o[k] = num(b.st[k], 0, 1e9, 0); return o; })() };
 }
 /* ---------- BOUSCULADE : rang classé (saisons mensuelles) ---------- */
@@ -265,7 +266,8 @@ function apiLeaderboard() {
   const ascInf = ascU.filter(x => x.a.inf > 0).map(x => ({ name: x.name, fl: x.a.inf })).sort((p, q) => q.fl - p.fl).slice(0, 30);
   const ascWk = ascU.filter(x => x.a.wk && x.a.wk.key === wkey && x.a.wk.fl > 0).map(x => ({ name: x.name, fl: x.a.wk.fl, t: x.a.wk.t })).sort((p, q) => q.fl - p.fl || p.t - q.t).slice(0, 30);
   const ss = SEASON(), bz = Object.values(Store.data.users).filter(u => u.party && u.party.s === ss && u.party.g > 0).map(u => ({ name: u.name, rp: u.party.rp, w: u.party.w, g: u.party.g, skin: (u.profile.look || {}).skin || 'survivor' })).sort((a, b) => b.rp - a.rp || b.w - a.w).slice(0, 50);
-  lbCache = { bz: { season: ss, top: bz }, xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length, asc: { week: wkey, inf: ascInf, wk: ascWk } }; lbTime = Date.now();
+  const today = new Date().toISOString().slice(0, 10), bzDay = Object.values(Store.data.users).filter(u => u.profile && u.profile.bz && u.profile.bz.dj && u.profile.bz.dj.day === today && u.profile.bz.dj.t > 0).map(u => ({ name: u.name, t: u.profile.bz.dj.t })).sort((a, b) => a.t - b.t).slice(0, 30);
+  lbCache = { bzDay: { day: today, top: bzDay }, bz: { season: ss, top: bz }, xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length, asc: { week: wkey, inf: ascInf, wk: ascWk } }; lbTime = Date.now();
   return [200, lbCache];
 }
 
