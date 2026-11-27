@@ -19,7 +19,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
-const VERSION = 3;     // 3 : reprise de session après une coupure (plus de joueur en double dans un salon)
+const VERSION = 4;     // 4 : mode classé de la Bousculade (rang par saison, classement mondial)
+//                       3 : reprise de session après une coupure (plus de joueur en double dans un salon)
 const PORT = process.env.PORT || 8080;
 const GH = {
   token: process.env.GITHUB_TOKEN || '',
@@ -141,7 +142,7 @@ function cleanProfile(p, name) {
   const st = p.stats && typeof p.stats === 'object' ? p.stats : {};
   const stats = {};
   for (const k of ['games', 'escapes', 'deaths', 'fuses', 'revives', 'downs', 'time', 'wins', 'items', 'solo', 'multi']) stats[k] = num(st[k], 0, 1e9, 0);
-  stats.best = {}; if (st.best && typeof st.best === 'object') for (const k of Object.keys(st.best).slice(0, 40)) { const v = num(st.best[k], 0, 1e7, 0); if (v) stats.best[k.slice(0, 24)] = v; }
+  stats.best = {}; if (st.best && typeof st.best === 'object') for (const k of Object.keys(st.best).slice(0, 90)) { const v = num(st.best[k], 0, 1e7, 0); if (v) stats.best[k.slice(0, 24)] = v; }
   const look = p.look && typeof p.look === 'object' ? p.look : {};
   const lk = {}; for (const k of ['skin', 'aura']) lk[k] = typeof look[k] === 'string' && look[k].length < 32 ? look[k] : null;
   if (!lk.skin) lk.skin = 'survivor';
@@ -153,8 +154,28 @@ function cleanProfile(p, name) {
     daily: num(p.daily, 0, 1e14, 0), streak: num(p.streak, 0, 1000, 0), achievements: strArr(p.achievements, 80),
     arena: cleanArena(p.arena, num, strArr),
     asc: cleanAsc(p.asc, num),
+    bz: cleanBz(p.bz, num, strArr),
   };
 }
+// BOUSCULADE : cosmétiques, quêtes du jour, passe de saison (le rang classé, lui, est calculé par le serveur)
+function cleanBz(b, num, strArr) {
+  b = b && typeof b === 'object' ? b : {};
+  const sid = v => typeof v === 'string' && /^[a-z_0-9]{2,24}$/.test(v) ? v : '';
+  const q = b.q && typeof b.q === 'object' ? b.q : {};
+  return { hat: sid(b.hat), trail: sid(b.trail), win: sid(b.win), own: strArr(b.own, 120).filter(sid),
+    q: { day: typeof q.day === 'string' ? q.day.slice(0, 10) : '', l: Array.isArray(q.l) ? q.l.slice(0, 4).filter(x => x && sid(x.id)).map(x => ({ id: x.id, p: num(x.p, 0, 1e6, 0), c: x.c ? 1 : 0 })) : [] },
+    sx: num(b.sx, 0, 1e9, 0), ss: typeof b.ss === 'string' ? b.ss.slice(0, 7) : '', got: num(b.got, 0, 1000, 0), st: (() => { const o = {}; if (b.st && typeof b.st === 'object') for (const k of Object.keys(b.st).slice(0, 30)) if (sid(k)) o[k] = num(b.st[k], 0, 1e9, 0); return o; })() };
+}
+/* ---------- BOUSCULADE : rang classé (saisons mensuelles) ---------- */
+const SEASON = () => new Date().toISOString().slice(0, 7);
+function partyRank(u) {
+  const s = SEASON(); let p = u.party;
+  if (!p || typeof p !== 'object') p = u.party = { rp: 0, w: 0, g: 0, best: 0, s };
+  if (p.s !== s) { p.prev = { s: p.s, rp: p.rp }; p.rp = Math.floor(p.rp * 0.4); p.w = 0; p.g = 0; p.s = s; }   // nouvelle saison : on garde 40 % des points
+  return p;
+}
+function rankView(u) { const p = partyRank(u); return { rp: p.rp, w: p.w, g: p.g, best: p.best, s: p.s, prev: p.prev || null }; }
+function rankDelta(pos, tot, won) { if (won) return 45; tot = Math.max(2, Math.min(12, tot)); return Math.round(30 - (pos - 1) * (55 / (tot - 1))); }
 
 // COLOSSES : L'ASCENSION — éclats d'âme, déblocages, paliers, records (formes et bornes contrôlées)
 function cleanAsc(a, num) {
@@ -220,7 +241,7 @@ async function apiLogin(body, ip) {
   u.seen = Date.now(); Store.touch();
   return [200, { token: makeToken(key, u.gen || 0), profile: u.profile }];
 }
-function apiMe(key) { const u = Store.data.users[key]; u.seen = Date.now(); return [200, { profile: u.profile }]; }
+function apiMe(key) { const u = Store.data.users[key]; u.seen = Date.now(); return [200, { profile: u.profile, rk: rankView(u) }]; }
 function apiSave(key, body) {
   const u = Store.data.users[key];
   const s = JSON.stringify(body.profile || {}); if (s.length > 30000) return [413, { error: 'Profil trop gros.' }];
@@ -243,7 +264,8 @@ function apiLeaderboard() {
   const ascU = Object.values(Store.data.users).map(u => ({ name: u.name, a: (u.profile && u.profile.asc) || {} }));
   const ascInf = ascU.filter(x => x.a.inf > 0).map(x => ({ name: x.name, fl: x.a.inf })).sort((p, q) => q.fl - p.fl).slice(0, 30);
   const ascWk = ascU.filter(x => x.a.wk && x.a.wk.key === wkey && x.a.wk.fl > 0).map(x => ({ name: x.name, fl: x.a.wk.fl, t: x.a.wk.t })).sort((p, q) => q.fl - p.fl || p.t - q.t).slice(0, 30);
-  lbCache = { xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length, asc: { week: wkey, inf: ascInf, wk: ascWk } }; lbTime = Date.now();
+  const ss = SEASON(), bz = Object.values(Store.data.users).filter(u => u.party && u.party.s === ss && u.party.g > 0).map(u => ({ name: u.name, rp: u.party.rp, w: u.party.w, g: u.party.g, skin: (u.profile.look || {}).skin || 'survivor' })).sort((a, b) => b.rp - a.rp || b.w - a.w).slice(0, 50);
+  lbCache = { bz: { season: ss, top: bz }, xp: top('xp'), escapes: top('escapes'), revives: top('revives'), total: all.length, asc: { week: wkey, inf: ascInf, wk: ascWk } }; lbTime = Date.now();
   return [200, lbCache];
 }
 
@@ -329,12 +351,12 @@ const cleanLook = l => { const o = {}; l = l && typeof l === 'object' ? l : {}; 
 
 function roomView(r) {
   return {
-    code: r.code, name: r.name, host: r.host, state: r.state, map: r.map, diff: r.diff, max: r.max, priv: r.priv, round: r.round, teams: r.teams || {},
+    code: r.code, name: r.name, host: r.host, state: r.state, map: r.map, diff: r.diff, max: r.max, priv: r.priv, round: r.round, teams: r.teams || {}, ranked: !!r.ranked, created: r.created, now: Date.now(),
     players: r.order.map(id => { const c = clients.get(id); return c ? { id, name: c.name, look: c.look, level: c.level, ready: !!r.ready[id], acc: !!c.account } : null; }).filter(Boolean),
   };
 }
 function roomList() {
-  return [...rooms.values()].filter(r => !r.priv).map(r => ({ code: r.code, name: r.name, hostName: (clients.get(r.host) || {}).name || '?', n: r.order.length, max: r.max, map: r.map, diff: r.diff, state: r.state }))
+  return [...rooms.values()].filter(r => !r.priv).map(r => ({ code: r.code, name: r.name, hostName: (clients.get(r.host) || {}).name || '?', n: r.order.length, max: r.max, map: r.map, diff: r.diff, state: r.state, ranked: !!r.ranked }))
     .sort((a, b) => (a.state === 'lobby' ? 0 : 1) - (b.state === 'lobby' ? 0 : 1) || b.n - a.n).slice(0, 60);
 }
 /* présence par jeu (écran d'accueil) : qui joue à quoi. Un joueur dans un salon compte pour le jeu du salon,
@@ -422,8 +444,8 @@ wss.on('connection', (ws, req) => {
         }
         c.sid = sid; c.hello = true;
         c.name = cleanName(m.name); c.look = cleanLook(m.look); c.level = Math.max(1, Math.min(999, m.level | 0 || 1));
-        if (m.token) { const k = readToken(m.token); if (k) { c.account = true; c.name = Store.data.users[k].name; } }
-        send(c, { t: 'welcome', id: c.id, v: VERSION, online: clients.size, rooms: roomList(), resumed });
+        if (m.token) { const k = readToken(m.token); if (k) { c.account = true; c.key = k; c.name = Store.data.users[k].name; } }
+        send(c, { t: 'welcome', id: c.id, v: VERSION, online: clients.size, rooms: roomList(), resumed, rk: c.key && Store.data.users[c.key] ? rankView(Store.data.users[c.key]) : null });
         if (resumed) { const rr = rooms.get(c.room); if (rr) { send(c, { t: 'room', room: roomView(rr) }); toRoom(rr, { t: 'sys', m: c.name + ' est de retour.' }, c.id); } }
         break;
       }
@@ -460,9 +482,18 @@ wss.on('connection', (ws, req) => {
         joinRoom(c, tr); break;
       }
       case 'quick': {
-        const cand = [...rooms.values()].filter(x => !x.priv && x.state === 'lobby' && x.order.length < x.max).sort((a, b) => b.order.length - a.order.length)[0];
+        const cand = [...rooms.values()].filter(x => !x.priv && !x.ranked && x.state === 'lobby' && x.order.length < x.max).sort((a, b) => b.order.length - a.order.length)[0];
         if (cand) joinRoom(c, cand);
         else send(c, { t: 'error', code: 'noquick', msg: 'Aucun salon public ouvert : crée le tien !' });
+        break;
+      }
+      case 'rquick': {   // file classée de la Bousculade : on rejoint un salon classé ouvert, sinon on en ouvre un
+        if (!c.key || !Store.data.users[c.key]) { send(c, { t: 'error', code: 'needacc', msg: 'Le mode classé demande un compte (menu Compte).' }); break; }
+        if (r) leaveRoom(c);
+        const cand = [...rooms.values()].filter(x => x.ranked && x.state === 'lobby' && x.order.length < x.max && !x.banned.has(c.ip + '|' + c.name)).sort((a, b) => b.order.length - a.order.length)[0];
+        if (cand) { joinRoom(c, cand); break; }
+        const nr = { code: newCode(), name: '🏆 Classé', host: c.id, state: 'lobby', map: 'p_bousc', diff: 'normal', max: 8, priv: false, ranked: true, order: [], ready: {}, round: 0, banned: new Set(), created: Date.now() };
+        rooms.set(nr.code, nr); log('Salon classé', nr.code, 'par', c.name); joinRoom(c, nr);
         break;
       }
       case 'leave': leaveRoom(c); send(c, { t: 'rooms', list: roomList(), online: clients.size }); break;
@@ -483,12 +514,24 @@ wss.on('connection', (ws, req) => {
       }
       case 'start': {
         if (!r || r.host !== c.id || r.state !== 'lobby') break;
-        r.state = 'game'; r.round++;
+        r.state = 'game'; r.round++; r.startAt = Date.now();
+        if (r.ranked) { r.rk = {}; for (const id of r.order) { const k = clients.get(id); if (k && k.key) r.rk[id] = k.key; } }
         const seed = (m.seed >>> 0) || crypto.randomInt(1, 2 ** 31);
         toRoom(r, { t: 'start', seed, map: m.map || r.map, diff: r.diff, round: r.round, room: roomView(r), cfg: m.cfg || null });
         break;
       }
-      case 'end': if (r && r.host === c.id && r.state === 'game') { r.state = 'lobby'; r.ready = {}; toRoom(r, { t: 'end', res: m.res || null }); broadcastRoom(r); } break;
+      case 'end': if (r && r.host === c.id && r.state === 'game') {
+        if (r.ranked && r.rk && m.res && Array.isArray(m.res.rank) && Date.now() - r.startAt > 45000) {
+          const rank = m.res.rank.slice(0, 16).map(String), win = Array.isArray(m.res.win) ? m.res.win.map(String) : [];
+          for (const [id, key] of Object.entries(r.rk)) {
+            const u = Store.data.users[key], pos = rank.indexOf(id) + 1; if (!u || pos < 1) continue;
+            const p = partyRank(u), won = win.includes(id), d = rankDelta(pos, rank.length, won);
+            p.rp = Math.max(0, p.rp + d); p.g++; if (won) p.w++; p.best = Math.max(p.best || 0, p.rp);
+            const k = clients.get(id); if (k) send(k, { t: 'rk', d, pos, tot: rank.length, ...rankView(u) });
+          }
+          r.rk = null; Store.touch(); lbTime = 0;
+        }
+        r.state = 'lobby'; r.ready = {}; toRoom(r, { t: 'end', res: m.res || null }); broadcastRoom(r); } break;
       case 'r': {   // relais de jeu
         if (!r) break;
         const out = JSON.stringify({ t: 'r', f: c.id, d: m.d });
