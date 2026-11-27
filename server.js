@@ -363,10 +363,11 @@ function roomList() {
 }
 /* présence par jeu (écran d'accueil) : qui joue à quoi. Un joueur dans un salon compte pour le jeu du salon,
    sinon pour le jeu dont il parcourt les menus (message « where »). */
-const GAMES = ['backrooms', 'colosses', 'portes'];
-const gameOfRoom = r => /^a_/.test(r.map) ? 'colosses' : (/^d_/.test(r.map) || String(r.name || '').includes('⁣')) ? 'portes' : 'backrooms';
+const GAMES = ['backrooms', 'colosses', 'portes', 'bousculade', 'blocs'];
+// salons : map « a_… » COLOSSES, « d_… » Les Portes, « p_… » Bousculade, « b_… » Blocaria, le reste Backrooms
+const gameOfRoom = r => /^a_/.test(r.map) ? 'colosses' : (/^d_/.test(r.map) || String(r.name || '').includes('⁣')) ? 'portes' : /^p_/.test(r.map) ? 'bousculade' : /^b_/.test(r.map) ? 'blocs' : 'backrooms';
 function presence() {
-  const out = { backrooms: [], colosses: [], portes: [] };
+  const out = {}; for (const g of GAMES) out[g] = [];
   for (const c of clients.values()) {
     if (c.gone || !c.hello) continue;
     const r = c.room && rooms.get(c.room), g = r ? gameOfRoom(r) : c.game;
