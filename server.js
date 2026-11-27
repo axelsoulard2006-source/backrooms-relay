@@ -525,7 +525,8 @@ wss.on('connection', (ws, req) => {
           const rank = m.res.rank.slice(0, 16).map(String), win = Array.isArray(m.res.win) ? m.res.win.map(String) : [];
           for (const [id, key] of Object.entries(r.rk)) {
             const u = Store.data.users[key], pos = rank.indexOf(id) + 1; if (!u || pos < 1) continue;
-            const p = partyRank(u), won = win.includes(id), d = rankDelta(pos, rank.length, won);
+            const p = partyRank(u), won = win.includes(id); let d = rankDelta(pos, rank.length, won);
+            if (Object.keys(r.rk).length < 2 && d > 0) d = Math.round(d * 0.6);   // seul contre des bots : gains réduits
             p.rp = Math.max(0, p.rp + d); p.g++; if (won) p.w++; p.best = Math.max(p.best || 0, p.rp);
             const k = clients.get(id); if (k) send(k, { t: 'rk', d, pos, tot: rank.length, ...rankView(u) });
           }
