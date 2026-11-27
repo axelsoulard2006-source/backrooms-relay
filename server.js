@@ -413,7 +413,8 @@ const village = new Map();         // id -> client présent au village
 const VMAX = 40;
 const vnum = (v, a, b) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(b, Math.round(v * 100) / 100)) : 0; };
 const vview = c => ({ id: c.id, n: c.name, look: c.look, lv: c.level, x: c.vil.x, y: c.vil.y, z: c.vil.z, r: c.vil.r, a: c.vil.a });
-function vbroadcast(from, o) { const s = JSON.stringify(o); village.forEach((v, id) => { if (id !== from) send(v, s); }); }
+// plusieurs « mondes » partagés : le village de l'Ascension ('asc') et la ville des jeux ('city')
+function vbroadcast(from, o) { const s = JSON.stringify(o), w = (clients.get(from) || {}).vw; village.forEach((v, id) => { if (id !== from && v.vw === w) send(v, s); }); }
 function villageLeave(c) { if (!village.has(c.id)) return; village.delete(c.id); c.vil = null; vbroadcast(c.id, { t: 'vleave', id: c.id }); }
 function dropClient(c, reason) { clearTimeout(c.goneTimer); c.goneTimer = null; villageLeave(c); leaveRoom(c, reason); clients.delete(c.id); }
 
@@ -544,9 +545,10 @@ wss.on('connection', (ws, req) => {
       }
       case 'vjoin': {
         if (!village.has(c.id) && village.size >= VMAX) break;
+        c.vw = m.w === 'city' ? 'city' : 'asc';
         c.vil = { x: vnum(m.x, -300, 300), y: vnum(m.y, -20, 400), z: vnum(m.z, -300, 300), r: vnum(m.r, -10, 10), a: typeof m.a === 'string' ? m.a.slice(0, 32) : '' };
         const was = village.has(c.id); village.set(c.id, c);
-        send(c, { t: 'vlist', p: [...village.values()].filter(v => v !== c && v.vil).map(vview) });
+        send(c, { t: 'vlist', p: [...village.values()].filter(v => v !== c && v.vil && v.vw === c.vw).map(vview) });
         if (!was) vbroadcast(c.id, Object.assign({ t: 'vjoin' }, vview(c)));
         break;
       }
@@ -561,7 +563,7 @@ wss.on('connection', (ws, req) => {
       case 'vchat': {
         if (!village.has(c.id)) break;
         const txt = String(m.m || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 120); if (!txt) break;
-        const o = JSON.stringify({ t: 'vchat', id: c.id, n: c.name, m: txt }); village.forEach(v => send(v, o));
+        const o = JSON.stringify({ t: 'vchat', id: c.id, n: c.name, m: txt }); village.forEach(v => { if (v.vw === c.vw) send(v, o); });
         break;
       }
       case 'chat': {
